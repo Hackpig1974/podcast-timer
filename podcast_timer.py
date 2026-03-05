@@ -1,5 +1,5 @@
 """
-podcast_timer.py  —  Podcast Timer v1.0
+podcast_timer.py  —  Podcast Timer v1.2.0
 Single-file app. Requires: customtkinter, pygame-ce, numpy, darkdetect
 Install: pip install customtkinter pygame-ce numpy darkdetect
 Run:     python podcast_timer.py
@@ -7,6 +7,37 @@ Run:     python podcast_timer.py
 import customtkinter as ctk
 import tkinter as tk
 import threading, time, math, os, sys, json, array as _arr
+import urllib.request, webbrowser
+
+VERSION      = "1.2.0"
+GITHUB_API   = "https://api.github.com/repos/Hackpig1974/podcast-timer/releases/latest"
+RELEASES_URL = "https://github.com/Hackpig1974/podcast-timer/releases/latest"
+
+def _check_for_update(callback):
+    """Fetch latest release tag in background; call callback(new_version) if newer, else callback(None)."""
+    def _run():
+        try:
+            req = urllib.request.Request(GITHUB_API,
+                headers={"User-Agent": "podcast-timer-app", "Accept": "application/vnd.github+json"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = json.loads(r.read().decode())
+            tag = data.get("tag_name", "").lstrip("v")
+            if tag and _newer(tag, VERSION):
+                callback(tag)
+            else:
+                callback(None)
+        except Exception:
+            callback(None)
+    threading.Thread(target=_run, daemon=True).start()
+
+def _newer(remote, local):
+    """Return True if remote version string is newer than local."""
+    try:
+        r = [int(x) for x in remote.split(".")]
+        l = [int(x) for x in local.split(".")]
+        return r > l
+    except Exception:
+        return False
 
 # ── Optional audio (pygame-ce preferred, plain pygame fallback) ───────────
 AUDIO_OK = False
@@ -20,16 +51,22 @@ except Exception:
 # ── Settings ──────────────────────────────────────────────────────────────
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 DEFAULT_SETTINGS = {
-    "always_on_top": False, "theme": "dark", "zoom": 1.0,
+    "always_on_top": False, "theme": "dark",
     "audio_enabled": True,  "top_minutes": 20, "top_seconds": 0,
     "bot_minutes": 2,       "bot_seconds": 0,
 }
+# Zoom is derived from window width at runtime
+BASE_WIDTH = 560   # px at fs=1.0
+MIN_WIDTH  = 400
+MAX_WIDTH  = 1100
 
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
         try:
             s = DEFAULT_SETTINGS.copy()
             with open(SETTINGS_FILE) as f: s.update(json.load(f))
+            # Remove legacy zoom key — window resize drives zoom now
+            s.pop("zoom", None)
             return s
         except Exception: pass
     return DEFAULT_SETTINGS.copy()
@@ -76,7 +113,6 @@ def _play_tone(freq, dur_ms, vol=0.45):
         sr = 44100; n = int(sr * dur_ms / 1000)
         t  = np.linspace(0, dur_ms/1000, n, False)
         wave = np.sin(2 * np.pi * freq * t)
-        # fade out last 20%
         fade_start = int(n * 0.8)
         wave[fade_start:] *= np.linspace(1, 0, n - fade_start)
         wave = (wave * vol * 32767).astype(np.int16)
@@ -169,7 +205,6 @@ def _make_pencil_canvas(parent, size, bg_color, command):
 # ─────────────────────────────────────────────────────────────────────────────
 class SettingsPanel(ctk.CTkFrame):
     def __init__(self, parent, settings, c, fs, on_apply, on_cancel):
-        # Use a neutral mid-gray that's visible on both dark and light themes
         super().__init__(parent, fg_color="#2e2e2e", border_color="#555555",
                          border_width=2, corner_radius=12)
         self.settings = settings.copy(); self.c = c; self.fs = fs
@@ -182,13 +217,20 @@ class SettingsPanel(ctk.CTkFrame):
         hf = ctk.CTkFont("Space Mono", int(11*fs), weight="bold")
         bf = ctk.CTkFont("Space Mono", int(10*fs), weight="bold")
         pad = int(20*fs)
-        # Use fixed neutral colors for settings panel so it's always visible
         txt   = "#ffffff"
         txt_s = "#aaaaaa"
         sep_c = "#444444"
         sep = lambda: ctk.CTkFrame(self, height=1, fg_color=sep_c).pack(fill="x", padx=pad, pady=6)
 
         ctk.CTkLabel(self, text="SETTINGS", font=hf, text_color=txt_s).pack(pady=(pad,4))
+        sep()
+
+        r4 = ctk.CTkFrame(self, fg_color="transparent"); r4.pack(fill="x", padx=pad, pady=4)
+        ctk.CTkLabel(r4, text="Audio Cues", font=lf, text_color=txt).pack(side="left")
+        self.sw_audio = ctk.CTkSwitch(r4, text="", width=int(44*fs),
+            progress_color=c["blue"], button_color="#cccccc")
+        self.sw_audio.pack(side="right")
+        if self.settings.get("audio_enabled", True): self.sw_audio.select()
         sep()
 
         r1 = ctk.CTkFrame(self, fg_color="transparent"); r1.pack(fill="x", padx=pad, pady=4)
@@ -208,39 +250,30 @@ class SettingsPanel(ctk.CTkFrame):
                 font=lf, text_color=txt, fg_color=c["blue"]).pack(side="left", padx=6)
         sep()
 
-        r3 = ctk.CTkFrame(self, fg_color="transparent"); r3.pack(fill="x", padx=pad, pady=4)
-        ctk.CTkLabel(r3, text="Zoom", font=lf, text_color=txt).pack(side="left")
-        self.zoom_lbl = ctk.CTkLabel(r3, text=f"{int(self.settings.get('zoom',1.0)*100)}%",
-            font=lf, text_color=c["blue"], width=int(44*fs))
-        self.zoom_lbl.pack(side="right")
-        self.zoom_sl = ctk.CTkSlider(r3, from_=0.85, to=2.0, number_of_steps=23,
-            progress_color=c["blue"], button_color=c["blue"], width=int(160*fs),
-            command=lambda v: self.zoom_lbl.configure(text=f"{int(v*100)}%"))
-        self.zoom_sl.set(self.settings.get("zoom",1.0)); self.zoom_sl.pack(side="right", padx=8)
-        sep()
-
-        r4 = ctk.CTkFrame(self, fg_color="transparent"); r4.pack(fill="x", padx=pad, pady=4)
-        ctk.CTkLabel(r4, text="Audio Cues", font=lf, text_color=txt).pack(side="left")
-        self.sw_audio = ctk.CTkSwitch(r4, text="", width=int(44*fs),
-            progress_color=c["blue"], button_color="#cccccc")
-        self.sw_audio.pack(side="right")
-        if self.settings.get("audio_enabled", True): self.sw_audio.select()
-        sep()
-
         br = ctk.CTkFrame(self, fg_color="transparent"); br.pack(pady=(4, 8))
         ctk.CTkButton(br, text="APPLY", font=bf, fg_color=c["blue"], text_color="#ffffff",
             width=int(90*fs), command=self._apply).grid(row=0, column=0, padx=8)
         ctk.CTkButton(br, text="CANCEL", font=bf, fg_color="#555555", text_color="#cccccc",
             width=int(90*fs), command=self.on_cancel).grid(row=0, column=1, padx=8)
-        
-        # Credit line
-        ctk.CTkLabel(self, text="Developed by Damon Downing, 2026",
-            font=ctk.CTkFont("Space Mono", int(10*fs)), text_color="#ffffff").pack(pady=(4, pad))
+
+        # Credit + version line
+        credit_row = ctk.CTkFrame(self, fg_color="transparent")
+        credit_row.pack(pady=(4, pad))
+        ctk.CTkLabel(credit_row, text=f"Developed by Damon Downing, 2026",
+            font=ctk.CTkFont("Space Mono", int(10*fs)), text_color="#ffffff").pack(side="left")
+        self._settings_ver_lbl = ctk.CTkLabel(credit_row,
+            text=f"  v{VERSION}", cursor="arrow",
+            font=ctk.CTkFont("Space Mono", int(10*fs)), text_color="#888888")
+        self._settings_ver_lbl.pack(side="left")
+        self._settings_update_lbl = ctk.CTkLabel(credit_row,
+            text="", cursor="hand2",
+            font=ctk.CTkFont("Space Mono", int(10*fs)), text_color="#a8e063")
+        self._settings_update_lbl.pack(side="left")
+        self._settings_update_lbl.bind("<Button-1>", lambda e: webbrowser.open(RELEASES_URL))
 
     def _apply(self):
         self.settings["always_on_top"] = bool(self.sw_top.get())
         self.settings["theme"]         = self.theme_var.get()
-        self.settings["zoom"]          = round(self.zoom_sl.get(), 2)
         self.settings["audio_enabled"] = bool(self.sw_audio.get())
         self.on_apply(self.settings)
 
@@ -257,7 +290,8 @@ class TimerZone(ctk.CTkFrame):
         self.label_text = label; self.fs = fs; self.is_top = is_top; self.c = colors
         self.on_start = on_start; self.on_stop = on_stop; self.on_next = on_next
         self.on_pause = None
-        self.on_edit = None   # set by app to open editing on both zones simultaneously
+        self.on_spk_pause = None
+        self.on_edit = None
         self.total_sec = 0; self.remain_sec = 0; self.running = False; self.editable = True
         self.edit_min = 0; self.edit_sec = 0; self.stage = "great"
         self._bar_pct = 0.0; self._pulse_alpha = 1.0
@@ -268,18 +302,15 @@ class TimerZone(ctk.CTkFrame):
         self.configure(fg_color=c["zone_bg"], border_color=c["zone_border"], border_width=1, corner_radius=10)
         ds  = int(88*fs) if self.is_top else int(62*fs)
         lbs = int(10*fs); bts = int(11*fs); sts = int(10*fs)
-        ew  = int(96*fs) if self.is_top else int(68*fs)
-        BTN_W = int(140*fs)   # uniform width for all bottom buttons
+        BTN_W = int(140*fs)
 
         self.lbl_zone = ctk.CTkLabel(self, text=self.label_text,
             font=ctk.CTkFont("Space Mono", lbs), text_color=c["text_sub"])
         self.lbl_zone.pack(pady=(6,2))
 
-        # ── outer frame just acts as an anchor point for .place() ──
         self._digit_outer = ctk.CTkFrame(self, fg_color="transparent")
         self._digit_outer.pack()
 
-        # label-row (always visible except during editing)
         self._df_labels = ctk.CTkFrame(self._digit_outer, fg_color="transparent")
         self._df_labels.pack()
 
@@ -292,7 +323,6 @@ class TimerZone(ctk.CTkFrame):
         self.lbl_sec_d = ctk.CTkLabel(self._df_labels, text="00",
             font=ctk.CTkFont("Space Mono", ds, weight="bold"), text_color=c["edit_color"])
         self.lbl_sec_d.grid(row=0, column=2)
-        # pencil canvas button — only on top zone
         if self.is_top:
             pencil_size = max(36, int(44 * fs))
             self._pencil_bg = c["zone_bg"]
@@ -303,10 +333,11 @@ class TimerZone(ctk.CTkFrame):
         else:
             self._btn_edit = None
 
-        # entry-row (hidden; packed/unpacked to swap with label-row)
         self._df_entries = ctk.CTkFrame(self._digit_outer, fg_color="transparent")
 
-        self._ent_min = ctk.CTkEntry(self._df_entries, width=int(120*fs) if self.is_top else int(90*fs), height=int(70*fs) if self.is_top else int(60*fs), justify="center",
+        self._ent_min = ctk.CTkEntry(self._df_entries,
+            width=int(120*fs) if self.is_top else int(90*fs),
+            height=int(70*fs) if self.is_top else int(60*fs), justify="center",
             font=ctk.CTkFont("Space Mono", ds, weight="bold"),
             fg_color=c["bg"], text_color=c["edit_color"],
             border_color=c["edit_color"], border_width=2)
@@ -314,7 +345,9 @@ class TimerZone(ctk.CTkFrame):
         ctk.CTkLabel(self._df_entries, text=":",
             font=ctk.CTkFont("Space Mono", ds, weight="bold"),
             text_color=c["text_sub"]).grid(row=0, column=1, padx=4)
-        self._ent_sec = ctk.CTkEntry(self._df_entries, width=int(120*fs) if self.is_top else int(90*fs), height=int(70*fs) if self.is_top else int(60*fs), justify="center",
+        self._ent_sec = ctk.CTkEntry(self._df_entries,
+            width=int(120*fs) if self.is_top else int(90*fs),
+            height=int(70*fs) if self.is_top else int(60*fs), justify="center",
             font=ctk.CTkFont("Space Mono", ds, weight="bold"),
             fg_color=c["bg"], text_color=c["edit_color"],
             border_color=c["edit_color"], border_width=2)
@@ -335,18 +368,15 @@ class TimerZone(ctk.CTkFrame):
         self._ent_min.bind("<Tab>",    lambda e: (self._ent_sec.focus(), "break"))
         self._editing = False
 
-        # progress bar
         bh = int(12*fs)
         self.bar_cv = tk.Canvas(self, height=bh+int(16*fs), bg=c["zone_bg"], highlightthickness=0)
         self.bar_cv.pack(fill="x", padx=int(28*fs), pady=(6,2))
         self.bar_cv.bind("<Configure>", lambda e: self._draw_bar())
 
-        # status label
         self.lbl_status = ctk.CTkLabel(self, text="" if not self.is_top else "DOING GREAT",
             font=ctk.CTkFont("Space Mono", sts), text_color=c["green"])
         self.lbl_status.pack(pady=(0,2))
 
-        # buttons — uniform width
         bf = ctk.CTkFrame(self, fg_color="transparent"); bf.pack(pady=(2,8))
         if self.is_top:
             self.btn_s = ctk.CTkButton(bf, text="▶  START",
@@ -362,17 +392,21 @@ class TimerZone(ctk.CTkFrame):
                 command=lambda: None)
             self.btn_p.grid(row=0,column=1,padx=6)
         else:
+            self.btn_spk_pause = ctk.CTkButton(bf, text="⏸  PAUSE",
+                font=ctk.CTkFont("Space Mono",bts,weight="bold"),
+                fg_color="#2a1a00", hover_color="#2a1a00", text_color="#3a2a00",
+                width=BTN_W, height=int(34*fs), corner_radius=6,
+                command=lambda: None)
+            self.btn_spk_pause.grid(row=0, column=0, padx=6)
             self.btn_n = ctk.CTkButton(bf, text="↺  NEXT / RESET",
                 font=ctk.CTkFont("Space Mono",bts,weight="bold"),
                 fg_color="#1a2030", hover_color="#1a2030", text_color="#2a3a50",
-                width=BTN_W*2+12, height=int(34*fs), corner_radius=6,
+                width=BTN_W, height=int(34*fs), corner_radius=6,
                 command=lambda: None)
-            self.btn_n.grid(row=0,column=0)
+            self.btn_n.grid(row=0,column=1,padx=6)
 
-    # ── inline edit mode ──────────────────────────────────────────────────
     def _enter_edit_mode(self):
         if not self.editable or self._editing: return
-        # If app has wired a coordinated edit callback, use that instead
         if self.on_edit:
             self.on_edit(); return
         self._start_edit_local()
@@ -384,16 +418,14 @@ class TimerZone(ctk.CTkFrame):
         self._ent_min.delete(0, "end"); self._ent_min.insert(0, f"{self.edit_min:02d}")
         self._ent_sec.delete(0, "end"); self._ent_sec.insert(0, f"{self.edit_sec:02d}")
         self._df_entries.pack()
-        # Safety check before focusing
         try:
             self._ent_min.focus()
             self._ent_min.select_range(0, "end")
-        except:
-            pass  # Widget may have been destroyed
-        # Dim START button while editing (same style as dimmed STOP/NEXT buttons)
+        except: pass
         if self.is_top:
-            self.btn_s.configure(fg_color="#1a2e1a", hover_color="#1a2e1a", 
+            self.btn_s.configure(fg_color="#1a2e1a", hover_color="#1a2e1a",
                                text_color="#2a4a2a", cursor="arrow")
+
     def _commit_edit(self):
         if not self._editing: return
         try:
@@ -405,9 +437,8 @@ class TimerZone(ctk.CTkFrame):
             return
         self._cancel_edit()
         self.set_time(m, s)
-        # Re-enable START button after editing
         if self.is_top:
-            self.btn_s.configure(fg_color=self.c["btn_start_bg"], 
+            self.btn_s.configure(fg_color=self.c["btn_start_bg"],
                                hover_color="#27a85e",
                                text_color=self.c["btn_start_fg"], cursor="hand2")
 
@@ -418,9 +449,8 @@ class TimerZone(ctk.CTkFrame):
         self._ent_min.configure(border_color=self.c["edit_color"])
         self._ent_sec.configure(border_color=self.c["edit_color"])
         self._df_labels.pack()
-        # Re-enable START button if editing was cancelled
         if self.is_top:
-            self.btn_s.configure(fg_color=self.c["btn_start_bg"], 
+            self.btn_s.configure(fg_color=self.c["btn_start_bg"],
                                hover_color="#27a85e",
                                text_color=self.c["btn_start_fg"], cursor="hand2")
 
@@ -460,7 +490,6 @@ class TimerZone(ctk.CTkFrame):
         if self._editing: self._cancel_edit()
         if self._btn_edit: self._btn_edit.grid_remove()
         self._refresh_digit_color()
-        # Apply stage to show status text when starting
         self._apply_stage()
         if self.is_top:
             self.btn_s.configure(text="⏸  PAUSE",
@@ -470,29 +499,23 @@ class TimerZone(ctk.CTkFrame):
                 text_color=self.c["btn_stop_fg"], text="■  STOP / RESET",
                 command=lambda: self.on_stop and self.on_stop())
         else:
+            self.btn_spk_pause.configure(fg_color="#e67e22", hover_color="#ca6f1e",
+                text_color="#ffffff",
+                command=lambda: self.on_spk_pause and self.on_spk_pause())
             self.btn_n.configure(fg_color=self.c["btn_next_bg"], hover_color="#2a7ac0",
                 text_color=self.c["btn_next_fg"],
                 command=lambda: self.on_next and self.on_next())
 
     def stop_timer(self):
         self.running = False; self.editable = True
-        if self._btn_edit: self._btn_edit.grid()   # restore pencil only on full reset
-        # Reset to default state
-        self.stage = "great"
-        self._bar_pct = 0.0
-        # Reset background color to normal
+        if self._btn_edit: self._btn_edit.grid()
+        self.stage = "great"; self._bar_pct = 0.0
         self.configure(fg_color=self.c["zone_bg"])
-        # Reset zone label
         self.lbl_zone.configure(text=self.label_text, text_color=self.c["text_sub"])
-        # Reset digit colors
         self.lbl_min.configure(text_color=self.c["edit_color"])
         self.lbl_sec_d.configure(text_color=self.c["edit_color"])
         self.lbl_col.configure(text_color=self.c["text_sub"])
-        # Hide status text for Speaker Timer when stopped
-        if not self.is_top:
-            self.lbl_status.configure(text="")
-        else:
-            self.lbl_status.configure(text="")
+        self.lbl_status.configure(text="")
         if self.is_top:
             self.btn_s.configure(text="▶  START",
                 fg_color=self.c["btn_start_bg"], hover_color="#27a85e",
@@ -502,6 +525,9 @@ class TimerZone(ctk.CTkFrame):
                 fg_color="#2a1a1a", hover_color="#2a1a1a",
                 text_color="#553333", command=lambda: None)
         else:
+            self.btn_spk_pause.configure(text="⏸  PAUSE",
+                fg_color="#2a1a00", hover_color="#2a1a00", text_color="#3a2a00",
+                command=lambda: None)
             self.btn_n.configure(fg_color="#1a2030", hover_color="#1a2030",
                 text_color="#2a3a50", command=lambda: None)
 
@@ -519,7 +545,6 @@ class TimerZone(ctk.CTkFrame):
         self.lbl_min.configure(text=f"{m:02d}"); self.lbl_sec_d.configure(text=f"{s:02d}")
         self._bar_pct = 1.0-(self.remain_sec/self.total_sec) if self.total_sec>0 else 0.0
         self._draw_bar()
-        # Update status text for Episode Timer based on percentage
         if self.is_top and self.stage == "great":
             self._apply_stage()
 
@@ -533,71 +558,32 @@ class TimerZone(ctk.CTkFrame):
         return None
 
     def _apply_stage(self):
-        c = self.c; s = self.stage
-        pct = self._bar_pct
-        
-        # Episode Timer has special text behavior and background color changes
+        c = self.c; s = self.stage; pct = self._bar_pct
         if self.is_top:
-            # Background color for Episode Timer zone
-            if s == "done":
-                self.configure(fg_color=c["bg_red"])
-            elif s == "red":
-                self.configure(fg_color=c["bg_red"])
-            elif s == "yellow":
-                self.configure(fg_color=c["bg_yellow"])
-            else:
-                self.configure(fg_color=c["zone_bg"])
-            
-            # Status text logic for Episode Timer
-            if s == "done":
-                status_text = "TIME'S UP"
-                status_color = c["red"]
-            elif s == "red":
-                status_text = "FINALIZE THE EPISODE"
-                status_color = c["red"]
-            elif s == "yellow":
-                status_text = "START SUMMARIZING"
-                status_color = c["yellow"]
-            elif 0.50 <= pct < 0.55:
-                status_text = "HALF WAY THERE"
-                status_color = c["green"]
-            else:
-                status_text = ""
-                status_color = c["green"]
+            if s in ("done","red"): self.configure(fg_color=c["bg_red"])
+            elif s == "yellow":     self.configure(fg_color=c["bg_yellow"])
+            else:                   self.configure(fg_color=c["zone_bg"])
+            if s == "done":              status_text, status_color = "TIME'S UP", c["red"]
+            elif s == "red":             status_text, status_color = "FINALIZE THE EPISODE", c["red"]
+            elif s == "yellow":          status_text, status_color = "START SUMMARIZING", c["yellow"]
+            elif 0.50 <= pct < 0.55:     status_text, status_color = "HALF WAY THERE", c["green"]
+            else:                        status_text, status_color = "", c["green"]
         else:
-            # Speaker Timer also changes background color
-            if s == "done":
-                self.configure(fg_color=c["bg_red"])
-            elif s == "red":
-                self.configure(fg_color=c["bg_red"])
-            elif s == "yellow":
-                self.configure(fg_color=c["bg_yellow"])
-            else:
-                self.configure(fg_color=c["zone_bg"])
-            
-            # Speaker Timer status text
-            m = {"great": (c["green"],"DOING GREAT"),
+            if s in ("done","red"): self.configure(fg_color=c["bg_red"])
+            elif s == "yellow":     self.configure(fg_color=c["bg_yellow"])
+            else:                   self.configure(fg_color=c["zone_bg"])
+            status_color, status_text = {"great":(c["green"],"DOING GREAT"),
                  "yellow":(c["yellow"],"GET TO THE POINT"),
                  "red":   (c["red"],"WRAP IT UP"),
                  "done":  (c["red"],"TIME'S UP")}[s]
-            status_color, status_text = m
-        
-        # Zone label color
+
         if s == "done":
-            zone_color = c["red"]
-            zone_text = "TIME'S UP"
+            zone_color, zone_text = c["red"], "TIME'S UP"
+            digit_color = colon_color = c["red"]
         else:
-            zone_color = c["text_sub"]
-            zone_text = self.label_text
-        
-        # Digit colors
-        if s == "done":
-            digit_color = c["red"]
-            colon_color = c["red"]
-        else:
-            digit_color = c["text"]
-            colon_color = c["text_sub"]
-        
+            zone_color, zone_text = c["text_sub"], self.label_text
+            digit_color = c["text"]; colon_color = c["text_sub"]
+
         self.lbl_status.configure(text=status_text, text_color=status_color)
         self.lbl_zone.configure(text=zone_text, text_color=zone_color)
         self.lbl_min.configure(text_color=digit_color)
@@ -612,13 +598,12 @@ class TimerZone(ctk.CTkFrame):
     def pulse_tick(self, alpha):
         self._pulse_alpha = alpha
         if self.stage == "red": self._draw_bar(pulse_alpha=alpha)
-        # Pulse digit colors when done
         if self.stage == "done":
-            # Pulse between red and white
             pulse_color = _blend(self.c["red"], "#ffffff", alpha)
             self.lbl_min.configure(text_color=pulse_color)
             self.lbl_sec_d.configure(text_color=pulse_color)
             self.lbl_col.configure(text_color=pulse_color)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PodcastTimerApp
@@ -630,38 +615,178 @@ class PodcastTimerApp(ctk.CTk):
         self._pulse_val = 0.0; self._pulse_dir = 1
         self._settings_open = False; self._clock_running = False
         self._colon_visible = True
+        self._spk_paused = False
+        self._resize_job = None
+        self._last_fs = 1.0
+        self._available_version = None   # set when update check finds something
         self._apply_settings(self.settings, first_run=True)
+        # Kick off update check after UI is up
+        self.after(2000, self._start_update_check)
 
     def _apply_settings(self, s, first_run=False):
         self.settings = s; save_settings(s)
-        fs = s["zoom"]; theme = s["theme"]
+        theme = s["theme"]
         try:
             import darkdetect; sys_dark = darkdetect.isDark()
         except Exception: sys_dark = True
         self.c = get_palette(theme, sys_dark)
         ctk.set_appearance_mode("dark" if theme in ("dark","system") else "light")
         if first_run:
-            self.title("Podcast Timer"); self.resizable(True, True); self.minsize(400, 500)
+            self.title("Podcast Timer")
+            self.resizable(True, True)
+            self.minsize(MIN_WIDTH, int(MIN_WIDTH * 565 / 560))
+            self.maxsize(MAX_WIDTH, int(MAX_WIDTH * 565 / 560 + 200))
         self.attributes("-topmost", s["always_on_top"])
         for w in self.winfo_children(): w.destroy()
         self._settings_open = False
+        fs = self._get_fs()
         self._build_ui(fs)
         self.top_zone.set_time(s["top_minutes"], s["top_seconds"])
         self.bot_zone.set_time(s["bot_minutes"], s["bot_seconds"])
-        if first_run: self._size_window(fs)
+        if first_run:
+            self._size_window(1.4)
+            self.after(50, self._initial_build)
+            self.bind("<Configure>", self._on_window_resize)
+
+    def _initial_build(self):
+        """Rebuild UI after window is fully realized so _get_fs() reads the correct width."""
+        fs = self._get_fs()
+        top_min = self.settings["top_minutes"]; top_sec = self.settings["top_seconds"]
+        bot_min = self.settings["bot_minutes"]; bot_sec = self.settings["bot_seconds"]
+        for w in self.winfo_children(): w.destroy()
+        self._settings_open = False
+        self._build_ui(fs)
+        self.top_zone.set_time(top_min, top_sec)
+        self.bot_zone.set_time(bot_min, bot_sec)
+        self._last_fs = fs
+        # Re-show banner if an update was already found before resize
+        if self._available_version:
+            self._show_update_banner(self._available_version)
+
+    def _start_update_check(self):
+        _check_for_update(lambda v: self.after(0, self._on_update_result, v))
+
+    def _on_update_result(self, new_version):
+        if not new_version: return
+        self._available_version = new_version
+        self._show_update_banner(new_version)
+
+    def _show_update_banner(self, version):
+        try:
+            self._update_banner.configure(height=28)
+            self._update_banner_label.configure(
+                text=f"▲  Version {version} available — click to download")
+            # Also update settings panel if it's open
+            if self._settings_open and hasattr(self, '_settings_update_lbl'):
+                self._settings_update_lbl.configure(text=f"  → v{version} available")
+        except Exception: pass
+
+    def _dismiss_update_banner(self):
+        try:
+            self._update_banner.configure(height=0)
+        except Exception: pass
+
+    def _get_fs(self):
+        try:
+            w = self.winfo_width()
+            if w < 10: w = BASE_WIDTH
+        except Exception: w = BASE_WIDTH
+        w = max(MIN_WIDTH, min(MAX_WIDTH, w))
+        return round(w / BASE_WIDTH, 3)
+
+    def _on_window_resize(self, event):
+        if event.widget is not self: return
+        new_fs = self._get_fs()
+        if not hasattr(self, '_last_fs'): self._last_fs = 1.0
+        if abs(new_fs - self._last_fs) < 0.02: return
+        self._last_fs = new_fs
+        if hasattr(self, '_resize_job') and self._resize_job:
+            self.after_cancel(self._resize_job)
+        self._resize_job = self.after(120, self._do_resize)
 
     def _size_window(self, fs):
         self.update_idletasks()
-        w = int(560*fs); h = int(565*fs)  # Increased to 565 for full button visibility at 100%
+        w = int(BASE_WIDTH * fs); h = int(565 * fs)
         sw = self.winfo_screenwidth(); sh = self.winfo_screenheight()
         self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        self._last_fs = fs  # pre-seed so resize events don't fire until user actually drags
+
+    def _do_resize(self):
+        self._resize_job = None
+        # Capture full timer state before destroying widgets
+        top_min      = self.top_zone.edit_min
+        top_sec      = self.top_zone.edit_sec
+        top_remain   = self.top_zone.remain_sec
+        top_total    = self.top_zone.total_sec
+        top_stage    = self.top_zone.stage
+        top_bar_pct  = self.top_zone._bar_pct
+        top_running  = self.top_zone.running
+        bot_min      = self.bot_zone.edit_min
+        bot_sec      = self.bot_zone.edit_sec
+        bot_remain   = self.bot_zone.remain_sec
+        bot_total    = self.bot_zone.total_sec
+        bot_stage    = self.bot_zone.stage
+        bot_bar_pct  = self.bot_zone._bar_pct
+        bot_running  = self.bot_zone.running
+        was_running  = self._clock_running
+
+        fs = self._get_fs()
+        for w in self.winfo_children(): w.destroy()
+        self._settings_open = False
+        self._build_ui(fs)
+
+        # Restore set-time (for edit fields) without touching remain_sec
+        self.top_zone.edit_min   = top_min;  self.top_zone.edit_sec  = top_sec
+        self.top_zone.total_sec  = top_total; self.top_zone.remain_sec = top_remain
+        self.top_zone.stage      = top_stage; self.top_zone._bar_pct  = top_bar_pct
+        self.bot_zone.edit_min   = bot_min;  self.bot_zone.edit_sec  = bot_sec
+        self.bot_zone.total_sec  = bot_total; self.bot_zone.remain_sec = bot_remain
+        self.bot_zone.stage      = bot_stage; self.bot_zone._bar_pct  = bot_bar_pct
+
+        # Refresh display with current remaining time
+        self.top_zone._refresh_display()
+        self.bot_zone._refresh_display()
+        self.top_zone._apply_stage()
+        self.bot_zone._apply_stage()
+
+        # Restore running UI state if timers were active
+        if top_running:
+            self.top_zone.running  = True
+            self.top_zone.editable = False
+            if self.top_zone._btn_edit: self.top_zone._btn_edit.grid_remove()
+            if was_running:
+                self.top_zone.btn_s.configure(text="⏸  PAUSE",
+                    fg_color="#e67e22", hover_color="#ca6f1e", text_color="#ffffff",
+                    command=self._on_pause)
+            else:
+                self.top_zone.btn_s.configure(text="▶  RESUME",
+                    fg_color=self.c["btn_start_bg"], hover_color="#27a85e",
+                    text_color=self.c["btn_start_fg"], command=self._on_resume)
+            self.top_zone.btn_p.configure(fg_color=self.c["btn_stop_bg"], hover_color="#c0392b",
+                text_color=self.c["btn_stop_fg"], text="■  STOP / RESET",
+                command=self._on_reset)
+            self.btn_settings.configure(state="disabled")
+
+        if bot_running:
+            self.bot_zone.running  = True
+            self.bot_zone.editable = False
+            if self._spk_paused:
+                self.bot_zone.btn_spk_pause.configure(text="▶  RESUME",
+                    fg_color=self.c["btn_start_bg"], hover_color="#27a85e",
+                    text_color=self.c["btn_start_fg"], command=self._on_spk_resume)
+                self.bot_zone.btn_n.configure(fg_color=self.c["btn_next_bg"], hover_color="#2a7ac0",
+                    text_color=self.c["btn_next_fg"], command=self._on_next_while_paused)
+            else:
+                self.bot_zone.btn_spk_pause.configure(text="⏸  PAUSE",
+                    fg_color="#e67e22", hover_color="#ca6f1e", text_color="#ffffff",
+                    command=self._on_spk_pause)
+                self.bot_zone.btn_n.configure(fg_color=self.c["btn_next_bg"], hover_color="#2a7ac0",
+                    text_color=self.c["btn_next_fg"], command=self._on_next)
 
     def _build_ui(self, fs):
         c = self.c; self.configure(fg_color=c["bg"])
         tb = ctk.CTkFrame(self, fg_color=c["title_bg"], height=int(38*fs), corner_radius=0)
         tb.pack(fill="x"); tb.pack_propagate(False)
-        # Removed the ● ● ● dots
-        # Add left padding to balance the Settings button on the right
         ctk.CTkLabel(tb, text="", width=int(80*fs)).pack(side="left")
         ctk.CTkLabel(tb, text="PODCAST  TIMER",
                      font=ctk.CTkFont("Space Mono", int(10*fs), weight="bold"),
@@ -671,6 +796,24 @@ class PodcastTimerApp(ctk.CTk):
                       fg_color="transparent", hover_color=c["bar_track"],
                       text_color=c["text_sub"], command=self._toggle_settings)
         self.btn_settings.pack(side="right", padx=8)
+
+        # ── Update banner (hidden until an update is found) ──────────────
+        self._update_banner = ctk.CTkFrame(self, fg_color="#1a2a00", corner_radius=0, height=0)
+        self._update_banner.pack(fill="x")
+        self._update_banner.pack_propagate(False)
+        # Dismiss button on the right, fixed width
+        ctk.CTkButton(self._update_banner, text="✕", width=24, height=20,
+            fg_color="transparent", hover_color="#2a3a00", text_color="#a8e063",
+            font=ctk.CTkFont("Space Mono", int(10*fs)),
+            command=self._dismiss_update_banner).pack(side="right", padx=8, pady=4)
+        # Label expands to fill remaining space and centers its text
+        self._update_banner_label = ctk.CTkLabel(
+            self._update_banner, text="", cursor="hand2",
+            font=ctk.CTkFont("Space Mono", int(10*fs)),
+            text_color="#a8e063", anchor="center")
+        self._update_banner_label.pack(side="left", fill="x", expand=True, pady=4)
+        self._update_banner_label.bind("<Button-1>", lambda e: webbrowser.open(RELEASES_URL))
+
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.main_frame.pack(fill="both", expand=True, padx=int(16*fs), pady=int(8*fs))
         self.top_zone = TimerZone(self.main_frame, "Episode Timer", fs, True, c,
@@ -681,6 +824,7 @@ class PodcastTimerApp(ctk.CTk):
         ctk.CTkFrame(self.main_frame, height=1, fg_color=c["bar_track"]).pack(
             fill="x", padx=int(40*fs), pady=int(6*fs))
         self.bot_zone = TimerZone(self.main_frame, "Speaker Timer", fs, False, c, on_next=self._on_next)
+        self.bot_zone.on_spk_pause = self._on_spk_pause
         self.bot_zone.pack(fill="x", pady=(int(6*fs), 0))
 
     def _toggle_settings(self):
@@ -689,18 +833,21 @@ class PodcastTimerApp(ctk.CTk):
 
     def _open_settings(self):
         self._settings_open = True
-        # Dim START button while settings is open
-        self.top_zone.btn_s.configure(fg_color="#1a2e1a", hover_color="#1a2e1a", 
+        self.top_zone.btn_s.configure(fg_color="#1a2e1a", hover_color="#1a2e1a",
                                      text_color="#2a4a2a", cursor="arrow")
-        self.settings_panel = SettingsPanel(self, self.settings, self.c, self.settings["zoom"],
+        fs = self._get_fs()
+        self.settings_panel = SettingsPanel(self, self.settings, self.c, fs,
                                             on_apply=self._on_settings_apply, on_cancel=self._close_settings)
         self.settings_panel.place(relx=1.0, rely=0.0, anchor="ne",
-                                  x=-int(8*self.settings["zoom"]), y=int(44*self.settings["zoom"]))
+                                  x=-int(8*fs), y=int(44*fs))
+        # Populate update label if a version is already known
+        if self._available_version and hasattr(self.settings_panel, '_settings_update_lbl'):
+            self.settings_panel._settings_update_lbl.configure(
+                text=f"  → v{self._available_version} available")
 
     def _close_settings(self):
         self._settings_open = False
-        # Re-enable START button when settings closes
-        self.top_zone.btn_s.configure(fg_color=self.c["btn_start_bg"], 
+        self.top_zone.btn_s.configure(fg_color=self.c["btn_start_bg"],
                                      hover_color="#27a85e",
                                      text_color=self.c["btn_start_fg"], cursor="hand2")
         if hasattr(self, "settings_panel"): self.settings_panel.destroy()
@@ -708,24 +855,18 @@ class PodcastTimerApp(ctk.CTk):
     def _on_settings_apply(self, ns):
         ns["top_minutes"] = self.top_zone.edit_min; ns["top_seconds"] = self.top_zone.edit_sec
         ns["bot_minutes"] = self.bot_zone.edit_min; ns["bot_seconds"] = self.bot_zone.edit_sec
-        zoom_changed = ns["zoom"] != self.settings["zoom"]
         self._apply_settings(ns)
-        if zoom_changed: self._size_window(ns["zoom"])
 
     def _on_edit_both(self):
         self.top_zone._start_edit_local()
         self.bot_zone._start_edit_local()
-        # Disable Settings button while editing (consistent with running state)
         self.btn_settings.configure(state="disabled")
-        # Redirect top OK to commit both
         self.top_zone._btn_confirm.configure(command=self._on_ok_both)
 
     def _on_ok_both(self):
         self.top_zone._commit_edit()
         self.bot_zone._commit_edit()
-        # Re-enable Settings button after editing
         self.btn_settings.configure(state="normal")
-        # Restore top OK to normal
         self.top_zone._btn_confirm.configure(command=self.top_zone._commit_edit)
 
     def _on_start(self):
@@ -735,7 +876,6 @@ class PodcastTimerApp(ctk.CTk):
         self.settings["bot_seconds"] = self.bot_zone.edit_sec
         save_settings(self.settings)
         self.top_zone.start_timer(); self.bot_zone.start_timer()
-        # Disable settings button while running
         self.btn_settings.configure(state="disabled")
         if not self._clock_running:
             self._clock_running = True
@@ -744,48 +884,76 @@ class PodcastTimerApp(ctk.CTk):
 
     def _on_pause(self):
         if self._clock_running:
-            # PAUSE
             self._clock_running = False
+            self._spk_paused = False
             self.top_zone.btn_s.configure(text="▶  RESUME",
                 fg_color=self.c["btn_start_bg"], hover_color="#27a85e",
-                text_color=self.c["btn_start_fg"],
-                command=self._on_resume)
-            # Dim NEXT/RESET button while paused
+                text_color=self.c["btn_start_fg"], command=self._on_resume)
+            self.bot_zone.btn_spk_pause.configure(text="⏸  PAUSE",
+                fg_color="#2a1a00", hover_color="#2a1a00", text_color="#3a2a00",
+                command=lambda: None)
             self.bot_zone.btn_n.configure(fg_color="#1a2030", hover_color="#1a2030",
                 text_color="#2a3a50", cursor="arrow")
-        
+
     def _on_resume(self):
         self._clock_running = True
         self.top_zone.btn_s.configure(text="⏸  PAUSE",
             fg_color="#e67e22", hover_color="#ca6f1e", text_color="#ffffff",
             command=self._on_pause)
-        # Re-enable NEXT/RESET button when resumed
+        self.bot_zone.btn_spk_pause.configure(text="⏸  PAUSE",
+            fg_color="#e67e22", hover_color="#ca6f1e", text_color="#ffffff",
+            command=self._on_spk_pause)
         self.bot_zone.btn_n.configure(fg_color=self.c["btn_next_bg"], hover_color="#2a7ac0",
-            text_color=self.c["btn_next_fg"], cursor="hand2")
+            text_color=self.c["btn_next_fg"], cursor="hand2", command=self._on_next)
         threading.Thread(target=self._clock_loop, daemon=True).start()
         self._pulse_loop(); self._blink_loop()
 
+    def _on_spk_pause(self):
+        self._spk_paused = True
+        self.bot_zone.btn_spk_pause.configure(text="▶  RESUME",
+            fg_color=self.c["btn_start_bg"], hover_color="#27a85e",
+            text_color=self.c["btn_start_fg"], command=self._on_spk_resume)
+        self.bot_zone.btn_n.configure(command=self._on_next_while_paused)
+
+    def _on_spk_resume(self):
+        self._spk_paused = False
+        self.bot_zone.btn_spk_pause.configure(text="⏸  PAUSE",
+            fg_color="#e67e22", hover_color="#ca6f1e", text_color="#ffffff",
+            command=self._on_spk_pause)
+        self.bot_zone.btn_n.configure(command=self._on_next)
+
+    def _on_next_while_paused(self):
+        """NEXT/RESET clicked while speaker is paused — reset and resume immediately."""
+        self._spk_paused = False
+        self.bot_zone.reset_speaker()
+        self.bot_zone.btn_spk_pause.configure(text="⏸  PAUSE",
+            fg_color="#e67e22", hover_color="#ca6f1e", text_color="#ffffff",
+            command=self._on_spk_pause)
+        self.bot_zone.btn_n.configure(command=self._on_next)
+        self._update_bg(self.top_zone.stage)
+
     def _on_reset(self):
         self._clock_running = False
+        self._spk_paused = False
         self.top_zone.stop_timer(); self.bot_zone.stop_timer()
         self.top_zone.remain_sec = self.top_zone.total_sec
         self.bot_zone.remain_sec = self.bot_zone.total_sec
         self.top_zone.stage = "great"; self.bot_zone.stage = "great"
         self.top_zone._bar_pct = 0.0;  self.bot_zone._bar_pct = 0.0
         self.top_zone._refresh_display(); self.bot_zone._refresh_display()
-        self.top_zone._apply_stage()
-        # Don't call _apply_stage on bot_zone - let stop_timer handle it (clears text)
-        self.bot_zone._draw_bar()
+        self.top_zone._apply_stage(); self.bot_zone._draw_bar()
         self.configure(fg_color=self.c["bg"])
-        # Re-enable settings button
         self.btn_settings.configure(state="normal")
-        # rewire stop button back to dimmed (no action)
         self.top_zone.btn_p.configure(text="■  STOP",
             fg_color="#2a1a1a", hover_color="#2a1a1a",
             text_color="#553333", command=lambda: None)
 
     def _on_next(self):
+        self._spk_paused = False
         self.bot_zone.reset_speaker()
+        self.bot_zone.btn_spk_pause.configure(text="⏸  PAUSE",
+            fg_color="#e67e22", hover_color="#ca6f1e", text_color="#ffffff",
+            command=self._on_spk_pause)
         self._update_bg(self.top_zone.stage)
 
     def _clock_loop(self):
@@ -796,7 +964,8 @@ class PodcastTimerApp(ctk.CTk):
 
     def _tick(self):
         if not self._clock_running: return
-        top_new = self.top_zone.tick(); bot_new = self.bot_zone.tick()
+        top_new = self.top_zone.tick()
+        bot_new = self.bot_zone.tick() if not self._spk_paused else None
         if self.settings.get("audio_enabled", True):
             for stage in filter(None, [top_new, bot_new]):
                 if stage=="yellow": beep_yellow()
@@ -805,7 +974,6 @@ class PodcastTimerApp(ctk.CTk):
         self._update_bg(self.top_zone.stage)
 
     def _update_bg(self, stage):
-        # Keep main window background constant - no color changes
         pass
 
     def _pulse_loop(self):
@@ -815,23 +983,17 @@ class PodcastTimerApp(ctk.CTk):
         if self._pulse_val <= 0.0: self._pulse_val = 0.0; self._pulse_dir =  1
         a = self._pulse_val
         self.top_zone.pulse_tick(a); self.bot_zone.pulse_tick(a)
-        # Pulse the entire panel background when done
         if self.top_zone.stage == "done":
             pulse_bg = _blend(self.c["bg_red"], self.c["zone_bg"], 1.0 - a*0.6)
             self.top_zone.configure(fg_color=pulse_bg)
         if self.bot_zone.stage == "done":
             pulse_bg = _blend(self.c["bg_red"], self.c["zone_bg"], 1.0 - a*0.6)
             self.bot_zone.configure(fg_color=pulse_bg)
-        # Removed pulsing background effect - keep window background constant
         self.after(40, self._pulse_loop)
 
     def _blink_loop(self):
         if not self._clock_running: return
         self._colon_visible = not self._colon_visible
-        # Colon blinking disabled - keep it always visible
-        # col = self.c["text_sub"] if self._colon_visible else _blend(self.c["text_sub"],self.c["zone_bg"],0.9)
-        # for z in (self.top_zone, self.bot_zone):
-        #     if z.stage not in ("done",): z.lbl_col.configure(text_color=col)
         self.after(500, self._blink_loop)
 
 

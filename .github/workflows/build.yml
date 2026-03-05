@@ -41,16 +41,12 @@ jobs:
     - name: Build with PyInstaller (macOS)
       if: matrix.os == 'macos-latest'
       run: |
-        pyinstaller --onefile --windowed --name "PodcastTimer" --icon=podcast_icon.ico podcast_timer.py
-        cd dist
-        mv PodcastTimer PodcastTimer-macOS
+        pyinstaller --onefile --windowed --name "PodcastTimer-macOS" --icon=podcast_icon.ico podcast_timer.py
         
     - name: Build with PyInstaller (Linux)
       if: matrix.os == 'ubuntu-latest'
       run: |
-        pyinstaller --onefile --windowed --name "PodcastTimer" podcast_timer.py
-        cd dist
-        mv PodcastTimer PodcastTimer-Linux
+        pyinstaller --onefile --windowed --name "PodcastTimer-Linux" podcast_timer.py
         
     - name: Upload artifacts (Windows)
       if: matrix.os == 'windows-latest'
